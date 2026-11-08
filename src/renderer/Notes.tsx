@@ -47,7 +47,7 @@ export function Notes({ project, onChanged, onError }: Props) {
         className="notes"
         value={text}
         placeholder="Notes for this project…"
-        spellCheck
+        spellCheck={false}
         onChange={(e) => {
           setText(e.target.value);
           pending.current = e.target.value;

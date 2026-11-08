@@ -21,6 +21,9 @@ interface Props {
   onError: (message: string) => void;
 }
 
+/** A "Latest" position from a day longer ago than this is shown grey: it is no current position. */
+const STALE_DAYS = 30;
+
 type SortKey = 'text' | 'latest' | 'week' | 'change' | 'clicks28' | 'impressions28';
 
 const DEVICE_LABELS: Record<string, string> = { '': 'All devices', DESKTOP: 'Desktop', MOBILE: 'Mobile', TABLET: 'Tablet' };
@@ -416,7 +419,14 @@ export function ProjectView({ project, signedIn, lastSync, onChanged, onDeleted,
                       <td>
                         <PageCell pages={keyword.pages} siteUrl={project.siteUrl} />
                       </td>
-                      <td className="num" title={summary.latestDate ? formatDate(summary.latestDate) : 'No impressions yet'}>
+                      <td
+                        className={`num${summary.latestDate && summary.latestDate < daysAgo(STALE_DAYS) ? ' stale' : ''}`}
+                        title={
+                          summary.latestDate
+                            ? `${formatDate(summary.latestDate)}${summary.latestDate < daysAgo(STALE_DAYS) ? ` (older than ${STALE_DAYS} days)` : ''}`
+                            : 'No impressions yet'
+                        }
+                      >
                         {formatPosition(summary.latestPosition)}
                       </td>
                       <td className="num">{formatPosition(summary.week)}</td>

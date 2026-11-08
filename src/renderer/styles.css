@@ -355,6 +355,15 @@ table.keywords {
   font-variant-numeric: tabular-nums;
 }
 
+.stale {
+  color: var(--muted);
+  opacity: 0.6;
+}
+
+.competition-search {
+  min-width: 240px;
+}
+
 .up {
   color: var(--up);
 }

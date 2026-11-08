@@ -61,7 +61,18 @@ export function Competition({ project, history, onChanged, onError }: Props) {
   const own = useMemo(() => ownDomainSet(project.ownDomains, project.siteUrl), [project.ownDomains, project.siteUrl]);
   const ownList = useMemo(() => [...own].sort(), [own]);
   const ignored = useMemo(() => new Set(project.ignoredDomains), [project.ignoredDomains]);
-  const latest = useMemo(() => latestResults(project.keywords, serp), [project.keywords, serp]);
+  // Filters: a tag limits the keywords that everything is computed over; the search text filters the lists.
+  const [tagFilter, setTagFilter] = useState('');
+  const [search, setSearch] = useState('');
+  const allTags = useMemo(() => [...new Set(project.keywords.flatMap((k) => k.tags))].sort((a, b) => a.localeCompare(b)), [project.keywords]);
+  const activeTag = allTags.includes(tagFilter) ? tagFilter : '';
+  const latest = useMemo(
+    () => latestResults(activeTag ? project.keywords.filter((k) => k.tags.includes(activeTag)) : project.keywords, serp),
+    [project.keywords, serp, activeTag],
+  );
+  const hasData = useMemo(() => latestResults(project.keywords, serp).length > 0, [project.keywords, serp]);
+  const needle = search.trim().toLowerCase();
+  const matches = (...texts: string[]) => !needle || texts.some((t) => t.toLowerCase().includes(needle));
   const stats = useMemo(() => competitorStats(latest, own, ignored), [latest, own, ignored]);
   const gapList = useMemo(() => gaps(latest, own, ignored), [latest, own, ignored]);
   const lastDate = latest.map((l) => l.date).sort().pop();
@@ -139,7 +150,31 @@ export function Competition({ project, history, onChanged, onError }: Props) {
         {latest.length > 0 && ` · ${minCount === maxCount ? maxCount : `${minCount}–${maxCount}`} results fetched per keyword`} · updated with
         Sync now and weekly
       </span>
+      {hasData && (
+        <div className="row">
+          {allTags.length > 0 && (
+            <select value={activeTag} onChange={(e) => setTagFilter(e.target.value)} title="Only the keywords with this tag (also for the stats)">
+              <option value="">All tags</option>
+              {allTags.map((t) => (
+                <option key={t} value={t}>
+                  {t}
+                </option>
+              ))}
+            </select>
+          )}
+          <input
+            className="competition-search"
+            placeholder="Filter by keyword or competitor"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+          />
+        </div>
+      )}
     </div>
+  );
+
+  const hasDataNote = hasData && latest.length === 0 && (
+    <div className="banner">No checked keywords with the tag “{activeTag}”.</div>
   );
 
   if (!serper.configured) {
@@ -155,7 +190,7 @@ export function Competition({ project, history, onChanged, onError }: Props) {
     return (
       <>
         {header}
-        <div className="banner">No competition data yet. Click “Sync now”.</div>
+        {hasDataNote || <div className="banner">No competition data yet. Click “Sync now”.</div>}
       </>
     );
   }
@@ -165,7 +200,7 @@ export function Competition({ project, history, onChanged, onError }: Props) {
     const keys = new Set([competitorKey]);
     const rows = latest.flatMap(({ keyword, entries }) => {
       const theirs = domainPosition(entries, keys);
-      return theirs ? [{ keyword, entries, theirs, mine: domainPosition(entries, own) }] : [];
+      return theirs && matches(keyword.text) ? [{ keyword, entries, theirs, mine: domainPosition(entries, own) }] : [];
     });
     const label = rows[0] ? competitorOf(rows[0].theirs).label : competitorKey;
     const chartKeyword = rows.find((r) => r.keyword.id === chartKeywordId) ?? rows[0];
@@ -249,7 +284,11 @@ export function Competition({ project, history, onChanged, onError }: Props) {
   }
 
   // ------------------------------------------------------------------ overview
-  const selectedKeyword = latest.find((l) => l.keyword.id === keywordId) ?? latest[0];
+  // The search text matches the keyword, or a competitor in its results (e.g. all keywords where a competitor ranks).
+  const visibleCompetitors = stats.competitors.filter((s) => matches(s.label));
+  const visibleLatest = latest.filter((l) => matches(l.keyword.text, ...l.entries.map((e) => competitorOf(e).label)));
+  const visibleGaps = gapList.filter((g) => matches(g.keyword.text, ...g.competitors.map((c) => c.competitor.label)));
+  const selectedKeyword = visibleLatest.find((l) => l.keyword.id === keywordId) ?? visibleLatest[0];
 
   return (
     <>
@@ -258,9 +297,9 @@ export function Competition({ project, history, onChanged, onError }: Props) {
       <div className="row segmented">
         {(
           [
-            ['competitors', `Competitors (${stats.competitors.length})`],
-            ['keywords', `Keywords (${latest.length})`],
-            ['gaps', `Gaps (${gapList.length})`],
+            ['competitors', `Competitors (${visibleCompetitors.length})`],
+            ['keywords', `Keywords (${visibleLatest.length})`],
+            ['gaps', `Gaps (${visibleGaps.length})`],
           ] as [View, string][]
         ).map(([value, label]) => (
           <button key={value} className={`chip${view === value ? ' active' : ''}`} onClick={() => setView(value)}>
@@ -289,13 +328,13 @@ export function Competition({ project, history, onChanged, onError }: Props) {
                 <th className="num">
                   <CopyButton
                     headers={['Competitor', 'Top 10', 'Top 20', 'Avg position', 'Share of voice %']}
-                    rows={stats.competitors.map((s) => [s.label, s.top10, s.top20, s.avgPosition, s.shareOfVoice * 100])}
+                    rows={visibleCompetitors.map((s) => [s.label, s.top10, s.top20, s.avgPosition, s.shareOfVoice * 100])}
                   />
                 </th>
               </tr>
             </thead>
             <tbody>
-              {stats.competitors.map((s) => (
+              {visibleCompetitors.map((s) => (
                 <tr key={s.key} onClick={() => setCompetitorKey(s.key)}>
                   <td>{s.label}</td>
                   <td className="num">{s.top10}</td>
@@ -395,7 +434,7 @@ export function Competition({ project, history, onChanged, onError }: Props) {
                   <th className="num">
                     <CopyButton
                       headers={['Keyword', 'Language', ...ownList.map((d) => `${d} (Google now)`), 'GSC avg (28d)', '#1', 'Results']}
-                      rows={latest.map((l) => [
+                      rows={visibleLatest.map((l) => [
                         l.keyword.text,
                         l.keyword.serpLanguage || project.serpLanguage,
                         ...ownList.map((d) => formatSerpPosition(domainPosition(l.entries, new Set([d])))),
@@ -408,7 +447,7 @@ export function Competition({ project, history, onChanged, onError }: Props) {
                 </tr>
               </thead>
               <tbody>
-                {latest.map((l) => (
+                {visibleLatest.map((l) => (
                   <tr
                     key={l.keyword.id}
                     className={l.keyword.id === selectedKeyword.keyword.id ? 'selected' : ''}
@@ -433,6 +472,8 @@ export function Competition({ project, history, onChanged, onError }: Props) {
         </div>
       )}
 
+      {view === 'keywords' && !selectedKeyword && <div className="banner">No keywords match the filter.</div>}
+
       {view === 'gaps' && (
         <section className="card">
           <p className="muted small">Keywords where a competitor (not ignored) is in the top 10 and none of your domains is.</p>
@@ -448,7 +489,7 @@ export function Competition({ project, history, onChanged, onError }: Props) {
                 <th className="num">
                   <CopyButton
                     headers={['Keyword', 'Competitors in the top 10', 'Your best', 'GSC avg (28d)']}
-                    rows={gapList.map((g) => [
+                    rows={visibleGaps.map((g) => [
                       g.keyword.text,
                       g.competitors.map((c) => `${c.competitor.label} (#${c.entry.position})`).join(', '),
                       formatSerpPosition(g.mine),
@@ -459,7 +500,7 @@ export function Competition({ project, history, onChanged, onError }: Props) {
               </tr>
             </thead>
             <tbody>
-              {gapList.map((g) => {
+              {visibleGaps.map((g) => {
                 const entries = latest.find((l) => l.keyword.id === g.keyword.id)?.entries ?? [];
                 const [first] = g.competitors;
                 return (
@@ -480,7 +521,7 @@ export function Competition({ project, history, onChanged, onError }: Props) {
                   </tr>
                 );
               })}
-              {gapList.length === 0 && (
+              {visibleGaps.length === 0 && (
                 <tr>
                   <td colSpan={5} className="muted">
                     No gaps.
