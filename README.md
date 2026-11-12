@@ -18,6 +18,8 @@ npm run build    # type check + build
 npm start        # start the built app
 ```
 
+`npm run dist` builds the Windows installer `release\SEO-Rank-Tracker-Setup-<version>.exe` (electron-builder, NSIS; per user, with a desktop and Start menu shortcut). It is not code-signed, so Windows SmartScreen warns on the first run ("More info" → "Run anyway"). Raise `version` in package.json for a new release.
+
 Data is stored in `%APPDATA%\seo-rank-tracker` (`data.json` and `history\*.json`). The Google refresh token is encrypted with Windows DPAPI (Electron safeStorage).
 
 ## Google setup (once)

@@ -263,6 +263,10 @@ function createTray(): void {
 
 // ---------------------------------------------------------------- app
 
+// The data folder stays %APPDATA%\seo-rank-tracker, also in the installed app (whose product name
+// "SEO Rank Tracker" would otherwise give it another folder, without the existing projects).
+app.setPath('userData', join(app.getPath('appData'), 'seo-rank-tracker'));
+
 if (!app.requestSingleInstanceLock()) {
   // Already running (e.g. in the tray): that instance shows its window.
   app.quit();
