@@ -81,6 +81,7 @@ export function ProjectView({ project, signedIn, lastSync, onChanged, onDeleted,
   const [selectedId, setSelectedId] = useState<string | undefined>(project.keywords[0]?.id);
   const [sort, setSort] = useState<{ key: SortKey; asc: boolean }>({ key: 'text', asc: true });
   const [activeTag, setActiveTag] = useState<string | undefined>();
+  const [search, setSearch] = useState('');
   const [tagEdit, setTagEdit] = useState<{ id: string; text: string } | undefined>();
 
   // Reloaded after every sync of this project, also the automatic ones.
@@ -115,8 +116,14 @@ export function ProjectView({ project, signedIn, lastSync, onChanged, onDeleted,
   }, [allTags, project.keywords, history]);
 
   const rows = useMemo(() => {
+    // Every word of the search text must match the keyword, one of its tags or one of its pages.
+    const needles = search.toLowerCase().split(/\s+/).filter(Boolean);
     const list = project.keywords
       .filter((k) => !filterTag || k.tags.includes(filterTag))
+      .filter((k) => {
+        const haystack = [k.text, ...k.tags, ...k.pages.map((p) => p.url)].map((s) => s.toLowerCase());
+        return needles.every((n) => haystack.some((s) => s.includes(n)));
+      })
       .map((k) => ({ keyword: k, summary: summarizeKeyword(history[k.id] ?? {}) }));
     const value = (r: (typeof list)[number]): string | number | undefined => {
       switch (sort.key) {
@@ -143,7 +150,7 @@ export function ProjectView({ project, signedIn, lastSync, onChanged, onDeleted,
       const cmp = typeof va === 'string' && typeof vb === 'string' ? va.localeCompare(vb) : Number(va) - Number(vb);
       return sort.asc ? cmp : -cmp;
     });
-  }, [project.keywords, history, sort, filterTag]);
+  }, [project.keywords, history, sort, filterTag, search]);
 
   const selected = project.keywords.find((k) => k.id === selectedId);
 
@@ -325,21 +332,37 @@ export function ProjectView({ project, signedIn, lastSync, onChanged, onDeleted,
           </div>
           <div className="keywords-main">
 
-          {tagSummaries.length > 0 && (
+          {project.keywords.length > 0 && (
             <div className="row tag-filter">
-              <button className={`chip${filterTag ? '' : ' active'}`} onClick={() => setActiveTag(undefined)}>
-                All · {project.keywords.length}
-              </button>
-              {tagSummaries.map((t) => (
-                <button
-                  key={t.tag}
-                  className={`chip${filterTag === t.tag ? ' active' : ''}`}
-                  title="Number of keywords · average position of the last 7 days"
-                  onClick={() => setActiveTag(filterTag === t.tag ? undefined : t.tag)}
-                >
-                  {t.tag} · {t.count} · avg {formatPosition(t.position)}
-                </button>
-              ))}
+              {tagSummaries.length > 0 && (
+                <>
+                  <button className={`chip${filterTag ? '' : ' active'}`} onClick={() => setActiveTag(undefined)}>
+                    All · {project.keywords.length}
+                  </button>
+                  {tagSummaries.map((t) => (
+                    <button
+                      key={t.tag}
+                      className={`chip${filterTag === t.tag ? ' active' : ''}`}
+                      title="Number of keywords · average position of the last 7 days"
+                      onClick={() => setActiveTag(filterTag === t.tag ? undefined : t.tag)}
+                    >
+                      {t.tag} · {t.count} · avg {formatPosition(t.position)}
+                    </button>
+                  ))}
+                </>
+              )}
+              <input
+                type="search"
+                className="keyword-search"
+                placeholder="Search keyword, tag or page (all words)"
+                spellCheck={false}
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Escape') setSearch('');
+                }}
+              />
+              {(search.trim() || filterTag) && <span className="muted small">{rows.length} shown</span>}
             </div>
           )}
 
@@ -455,7 +478,11 @@ export function ProjectView({ project, signedIn, lastSync, onChanged, onDeleted,
                 {rows.length === 0 && (
                   <tr>
                     <td colSpan={10} className="muted">
-                      {filterTag ? 'No keywords with this tag.' : 'No keywords yet. Add them below or from the Opportunities tab.'}
+                      {search.trim()
+                        ? 'No keywords match the search.'
+                        : filterTag
+                          ? 'No keywords with this tag.'
+                          : 'No keywords yet. Add them below or from the Opportunities tab.'}
                     </td>
                   </tr>
                 )}

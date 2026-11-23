@@ -437,6 +437,11 @@ table.keywords {
   gap: 6px;
 }
 
+.keyword-search {
+  margin-left: auto;
+  min-width: 240px;
+}
+
 .tags-cell {
   cursor: text;
   min-width: 110px;
