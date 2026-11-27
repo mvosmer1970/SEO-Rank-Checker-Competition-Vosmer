@@ -16,6 +16,7 @@ import { CompetitorChart } from './CompetitorChart';
 import { CopyButton } from './CopyButton';
 import { PageComparison, type ComparisonRequest } from './PageComparison';
 import { shortUrl } from './ProjectView';
+import { sortRows, useSort } from './table';
 
 interface Props {
   project: Project;
@@ -45,6 +46,10 @@ export function Competition({ project, history, onChanged, onError }: Props) {
   const [keywordId, setKeywordId] = useState<string | undefined>();
   const [chartKeywordId, setChartKeywordId] = useState<string | undefined>();
   const [comparison, setComparison] = useState<ComparisonRequest | undefined>();
+  const competitorSort = useSort<"label" | "top10" | "top20" | "avg" | "sov">({ key: "sov", asc: false }, ["label", "avg"]);
+  const keywordSort = useSort<string>({ key: "", asc: true }, ["keyword", "lang", "gsc", "first"]);
+  const gapSort = useSort<"keyword" | "competitors" | "mine" | "gsc">({ key: "keyword", asc: true }, ["keyword", "mine", "gsc"]);
+  const detailSort = useSort<"keyword" | "theirs" | "mine" | "url">({ key: "theirs", asc: true }, ["keyword", "theirs", "mine", "url"]);
 
   const reload = useCallback(() => {
     api.getSerpData(project.id).then(setSerp, (e: unknown) => onError(errorMessage(e)));
@@ -198,10 +203,16 @@ export function Competition({ project, history, onChanged, onError }: Props) {
   // ------------------------------------------------------------------ competitor detail
   if (competitorKey) {
     const keys = new Set([competitorKey]);
-    const rows = latest.flatMap(({ keyword, entries }) => {
+    const unsorted = latest.flatMap(({ keyword, entries }) => {
       const theirs = domainPosition(entries, keys);
       return theirs && matches(keyword.text) ? [{ keyword, entries, theirs, mine: domainPosition(entries, own) }] : [];
     });
+    const { key: detailKey, asc: detailAsc } = detailSort.sort;
+    const rows = sortRows(
+      unsorted,
+      (r) => (detailKey === "keyword" ? r.keyword.text : detailKey === "theirs" ? r.theirs.position : detailKey === "mine" ? r.mine?.position : r.theirs.url),
+      detailAsc,
+    );
     const label = rows[0] ? competitorOf(rows[0].theirs).label : competitorKey;
     const chartKeyword = rows.find((r) => r.keyword.id === chartKeywordId) ?? rows[0];
     const dates = chartKeyword ? Object.keys(serp.results[chartKeyword.keyword.id] ?? {}).sort() : [];
@@ -239,10 +250,10 @@ export function Competition({ project, history, onChanged, onError }: Props) {
           <table className="keywords">
             <thead>
               <tr>
-                <th>Keyword</th>
-                <th className="num">Their position</th>
-                <th className="num">Your position</th>
-                <th>Their URL</th>
+                {detailSort.th("keyword", "Keyword")}
+                {detailSort.th("theirs", "Their position", "num")}
+                {detailSort.th("mine", "Your position", "num")}
+                {detailSort.th("url", "Their URL")}
                 <th className="num">
                   <CopyButton
                     headers={['Keyword', 'Their position', 'Your position', 'Their URL']}
@@ -285,9 +296,34 @@ export function Competition({ project, history, onChanged, onError }: Props) {
 
   // ------------------------------------------------------------------ overview
   // The search text matches the keyword, or a competitor in its results (e.g. all keywords where a competitor ranks).
-  const visibleCompetitors = stats.competitors.filter((s) => matches(s.label));
-  const visibleLatest = latest.filter((l) => matches(l.keyword.text, ...l.entries.map((e) => competitorOf(e).label)));
-  const visibleGaps = gapList.filter((g) => matches(g.keyword.text, ...g.competitors.map((c) => c.competitor.label)));
+  const { key: cKey, asc: cAsc } = competitorSort.sort;
+  const visibleCompetitors = sortRows(
+    stats.competitors.filter((s) => matches(s.label)),
+    (s) => (cKey === "label" ? s.label : cKey === "top10" ? s.top10 : cKey === "top20" ? s.top20 : cKey === "avg" ? s.avgPosition : s.shareOfVoice),
+    cAsc,
+  );
+  const { key: kKey, asc: kAsc } = keywordSort.sort;
+  const filteredLatest = latest.filter((l) => matches(l.keyword.text, ...l.entries.map((e) => competitorOf(e).label)));
+  const visibleLatest = kKey
+    ? sortRows(
+        filteredLatest,
+        (l) => {
+          if (kKey.startsWith("own:")) return domainPosition(l.entries, new Set([kKey.slice(4)]))?.position;
+          if (kKey === "keyword") return l.keyword.text;
+          if (kKey === "lang") return l.keyword.serpLanguage || project.serpLanguage;
+          if (kKey === "gsc") return gscAverage(l.keyword);
+          if (kKey === "first") return l.entries[0] ? competitorOf(l.entries[0]).label : undefined;
+          return l.entries.length;
+        },
+        kAsc,
+      )
+    : filteredLatest;
+  const { key: gKey, asc: gAsc } = gapSort.sort;
+  const visibleGaps = sortRows(
+    gapList.filter((g) => matches(g.keyword.text, ...g.competitors.map((c) => c.competitor.label))),
+    (g) => (gKey === "keyword" ? g.keyword.text : gKey === "competitors" ? g.competitors.length : gKey === "mine" ? g.mine?.position : gscAverage(g.keyword)),
+    gAsc,
+  );
   const selectedKeyword = visibleLatest.find((l) => l.keyword.id === keywordId) ?? visibleLatest[0];
 
   return (
@@ -318,13 +354,11 @@ export function Competition({ project, history, onChanged, onError }: Props) {
           <table className="keywords">
             <thead>
               <tr>
-                <th>Competitor</th>
-                <th className="num">Top 10</th>
-                <th className="num">Top 20</th>
-                <th className="num">Avg position</th>
-                <th className="num" title="Share of the estimated clicks of all top 20 results that are not ignored">
-                  Share of voice
-                </th>
+                {competitorSort.th("label", "Competitor")}
+                {competitorSort.th("top10", "Top 10", "num")}
+                {competitorSort.th("top20", "Top 20", "num")}
+                {competitorSort.th("avg", "Avg position", "num")}
+                {competitorSort.th("sov", "Share of voice", "num")}
                 <th className="num">
                   <CopyButton
                     headers={['Competitor', 'Top 10', 'Top 20', 'Avg position', 'Share of voice %']}
@@ -419,18 +453,12 @@ export function Competition({ project, history, onChanged, onError }: Props) {
             <table className="keywords">
               <thead>
                 <tr>
-                  <th>Keyword</th>
-                  <th>Lang</th>
-                  {ownList.map((d) => (
-                    <th key={d} className="num" title="Position in Google now (Serper)">
-                      {d}
-                    </th>
-                  ))}
-                  <th className="num" title="Average position in Search Console, last 28 days">
-                    GSC avg
-                  </th>
-                  <th>#1</th>
-                  <th className="num">Results</th>
+                  {keywordSort.th("keyword", "Keyword")}
+                  {keywordSort.th("lang", "Lang")}
+                  {ownList.map((d) => keywordSort.th(`own:${d}`, d, "num"))}
+                  {keywordSort.th("gsc", "GSC avg", "num")}
+                  {keywordSort.th("first", "#1")}
+                  {keywordSort.th("results", "Results", "num")}
                   <th className="num">
                     <CopyButton
                       headers={['Keyword', 'Language', ...ownList.map((d) => `${d} (Google now)`), 'GSC avg (28d)', '#1', 'Results']}
@@ -480,12 +508,10 @@ export function Competition({ project, history, onChanged, onError }: Props) {
           <table className="keywords">
             <thead>
               <tr>
-                <th>Keyword</th>
-                <th>Competitors in the top 10</th>
-                <th className="num">Your best</th>
-                <th className="num" title="Average position in Search Console, last 28 days">
-                  GSC avg
-                </th>
+                {gapSort.th("keyword", "Keyword")}
+                {gapSort.th("competitors", "Competitors in the top 10")}
+                {gapSort.th("mine", "Your best", "num")}
+                {gapSort.th("gsc", "GSC avg", "num")}
                 <th className="num">
                   <CopyButton
                     headers={['Keyword', 'Competitors in the top 10', 'Your best', 'GSC avg (28d)']}

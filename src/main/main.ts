@@ -1,5 +1,6 @@
 // Electron main process: the window, the tray icon, the daily sync and the handlers behind window.rankTracker.
-import { app, BrowserWindow, clipboard, ipcMain, Menu, nativeImage, Notification, powerMonitor, shell, Tray } from 'electron';
+import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, nativeImage, Notification, powerMonitor, shell, Tray } from 'electron';
+import { writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { AppOptions, RankAlert, RankTrackerApi, SerpCheckResult, SyncResult } from '../shared/types';
 import * as google from './google';
@@ -14,6 +15,10 @@ const AUTO_SYNC_CHECK_MS = 60 * 60 * 1000;
 const AUTO_SYNC_FIRST_CHECK_MS = 60 * 1000;
 
 let window: BrowserWindow | undefined;
+
+/** The title bar is drawn by the app (in the theme's color); Windows only draws its buttons over it. */
+const TITLE_BAR_HEIGHT = 32;
+let titleBar = { color: '#4a1f05', symbolColor: '#f2d3bd', height: TITLE_BAR_HEIGHT };
 let tray: Tray | undefined;
 let quitting = false;
 
@@ -122,6 +127,12 @@ const handlers: Handlers = {
   setProjectNotes: (projectId, notes) => store.setProjectNotes(projectId, notes),
   setKeywordLanguage: (projectId, keywordId, language) => store.setKeywordLanguage(projectId, keywordId, language),
   getHistory: (projectId) => store.readHistory(projectId),
+  getTargetHistory: (projectId) => store.readTargetHistory(projectId),
+  setKeywordTarget: async (projectId, keywordId, url) => {
+    store.setKeywordTarget(projectId, keywordId, url);
+    await google.syncKeywordTarget(projectId, keywordId);
+    return store.getProject(projectId);
+  },
   syncProject: (projectId) => syncAndNotify(projectId),
   getOpportunities: (projectId) => google.getOpportunities(projectId),
   getRankingKeywords: (projectId, filter) => google.getRankingKeywords(projectId, filter),
@@ -135,9 +146,28 @@ const handlers: Handlers = {
   copyToClipboard: (text) => {
     clipboard.writeText(text);
   },
+  setTitleBarColors: (color, symbolColor) => {
+    titleBar = { color, symbolColor, height: TITLE_BAR_HEIGHT };
+    if (process.platform === 'win32') window?.setTitleBarOverlay(titleBar);
+  },
+  saveTextFile: async (defaultName, content) => {
+    const options = { defaultPath: join(app.getPath('downloads'), defaultName), filters: [{ name: 'CSV', extensions: ['csv'] }] };
+    const result = window ? await dialog.showSaveDialog(window, options) : await dialog.showSaveDialog(options);
+    if (result.canceled || !result.filePath) return false;
+    await writeFile(result.filePath, content, 'utf8');
+    return true;
+  },
   saveSerperApiKey: (key) => {
     store.setSerperApiKey(key);
   },
+  listResearchSites: () => store.listResearchSites(),
+  createResearchSite: (input) => store.createResearchSite(input),
+  updateResearchSite: (id, input) => store.updateResearchSite(id, input),
+  deleteResearchSite: (id) => store.deleteResearchSite(id),
+  getResearchData: (id) => store.readResearch(id),
+  saveResearchCrawl: (id, pages, skippedUrls) => store.saveResearchCrawl(id, pages, skippedUrls),
+  checkResearchKeywords: (id, keywords) => serper.checkResearchKeywords(id, keywords),
+  setResearchKeywordList: (id, added, removed) => store.setResearchKeywordList(id, added, removed),
 
   getGoogleSettings: () => store.getGoogleSettings(),
   saveGoogleSettings: (settings) => {
@@ -211,6 +241,8 @@ function createWindow(show: boolean): void {
     icon: createIcon(),
     show,
     autoHideMenuBar: true,
+    titleBarStyle: 'hidden',
+    titleBarOverlay: titleBar,
     webPreferences: {
       preload: join(__dirname, 'preload.cjs'),
       contextIsolation: true,

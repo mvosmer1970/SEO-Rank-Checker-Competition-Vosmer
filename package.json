@@ -1,6 +1,6 @@
 {
   "name": "seo-rank-tracker",
-  "version": "0.1.3",
+  "version": "0.4.2",
   "private": true,
   "description": "Desktop app that tracks Google rankings of your own sites through the Search Console API.",
   "author": "Lialis",
@@ -31,6 +31,7 @@
       "oneClick": true,
       "perMachine": true,
       "runAfterFinish": true,
+      "include": "build/installer.nsh",
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
       "shortcutName": "SEO Rank Tracker",

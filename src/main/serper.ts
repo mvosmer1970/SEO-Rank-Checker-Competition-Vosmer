@@ -3,7 +3,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { rootDomain } from '../shared/competition';
 import { daysAgo } from '../shared/metrics';
-import type { FetchedPage, SerpCheckResult, SerpEntry } from '../shared/types';
+import type { FetchedPage, ResearchData, ResearchKeyword, SerpCheckResult, SerpEntry } from '../shared/types';
 import * as store from './store';
 
 const SERPER_URL = 'https://google.serper.dev/search';
@@ -49,12 +49,12 @@ const LOCATIONS: Record<string, string> = {
 /** Pages of 10 results; a third page fills up when Google shows fewer than 10 organic results on a page. */
 const MAX_PAGES = 3;
 
-async function searchPage(apiKey: string, q: string, gl: string, hl: string, page: number) {
+async function searchPage(apiKey: string, q: string, gl: string, hl: string, page: number, num = 10) {
   const location = LOCATIONS[gl];
   const response = await fetch(SERPER_URL, {
     method: 'POST',
     headers: { 'X-API-KEY': apiKey, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ q, gl, hl, ...(location ? { location } : {}), num: 10, page }),
+    body: JSON.stringify({ q, gl, hl, ...(location ? { location } : {}), num, page }),
   });
   const body = (await response.json()) as SerperResponse;
   if (!response.ok) throw new Error(`Serper: ${body.message ?? response.statusText}`);
@@ -132,5 +132,57 @@ export async function fetchPage(url: string): Promise<FetchedPage> {
   });
   const buffer = await response.arrayBuffer();
   if (buffer.byteLength > MAX_PAGE_BYTES) throw new Error(`Page too large: ${url}`);
-  return { url, finalUrl: response.url || url, status: response.status, html: new TextDecoder().decode(buffer) };
+  return {
+    url,
+    finalUrl: response.url || url,
+    status: response.status,
+    contentType: response.headers.get('content-type') ?? '',
+    html: new TextDecoder().decode(buffer),
+  };
+}
+
+const MAX_RESEARCH_KEYWORDS = 200;
+
+const RESEARCH_DEPTH = 100;
+
+/** One Serper search for up to the top 100 (Google may return fewer), numbered 1..n without duplicates. */
+async function searchTop100(apiKey: string, q: string, gl: string, hl: string): Promise<SerpEntry[]> {
+  const entries: SerpEntry[] = [];
+  const seen = new Set<string>();
+  for (const r of await searchPage(apiKey, q, gl, hl, 1, RESEARCH_DEPTH)) {
+    if (!r.link || seen.has(r.link)) continue;
+    seen.add(r.link);
+    entries.push({ position: entries.length + 1, url: r.link, title: r.title ?? '', domain: rootDomain(r.link) });
+  }
+  return entries;
+}
+
+/**
+ * Looks the keywords up in Google (one Serper search each, for the top 100) with the country and language of the
+ * researched site, and stores the best position of the site per keyword and the top 10.
+ */
+export async function checkResearchKeywords(siteId: string, keywords: string[]): Promise<ResearchData> {
+  const { key } = store.getSerperApiKey();
+  if (!key) throw new Error('Enter the Serper API key in Settings first (or SERPER_API_KEY in .env)');
+  const site = store.getResearchSite(siteId);
+  const queue = [...new Set(keywords.map((k) => k.trim().toLowerCase().replace(/\s+/g, ' ')).filter(Boolean))];
+  if (queue.length > MAX_RESEARCH_KEYWORDS) throw new Error(`Check at most ${MAX_RESEARCH_KEYWORDS} keywords at a time`);
+  const domain = rootDomain(site.domain);
+  const date = daysAgo(0);
+  const checks: ResearchKeyword[] = [];
+
+  const worker = async (): Promise<void> => {
+    for (let keyword = queue.shift(); keyword; keyword = queue.shift()) {
+      const entries = await searchTop100(key, keyword, site.serpCountry, site.serpLanguage);
+      const mine = entries.find((e) => rootDomain(e.url) === domain);
+      checks.push({ keyword, checkedAt: date, position: mine?.position, url: mine?.url ?? '', depth: entries.length, top: entries.slice(0, 10) });
+    }
+  };
+  try {
+    await Promise.all(Array.from({ length: CONCURRENCY }, worker));
+  } finally {
+    // What was checked before an error (e.g. no credits left) is kept.
+    if (checks.length) store.saveResearchKeywords(siteId, checks);
+  }
+  return store.readResearch(siteId);
 }

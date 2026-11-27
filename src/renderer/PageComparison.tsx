@@ -2,6 +2,7 @@
 import { useEffect, useState, type ReactNode } from 'react';
 import { rootDomain } from '../shared/competition';
 import { api, errorMessage } from './api';
+import { schemaTypes, text } from './siteAnalysis';
 
 export interface ComparisonRequest {
   keyword: string;
@@ -26,33 +27,6 @@ interface PageAnalysis {
   externalLinks: number;
   keywordInTitle: boolean;
   keywordInH1: boolean;
-}
-
-function text(element: Element | null): string {
-  return (element?.textContent ?? '').replace(/\s+/g, ' ').trim();
-}
-
-/** All @type values of the JSON-LD blocks, also nested ones and those in @graph. */
-function schemaTypes(doc: Document): string[] {
-  const types = new Set<string>();
-  const visit = (value: unknown): void => {
-    if (Array.isArray(value)) value.forEach(visit);
-    else if (value && typeof value === 'object') {
-      for (const [key, child] of Object.entries(value)) {
-        if (key === '@type') {
-          for (const t of Array.isArray(child) ? child : [child]) if (typeof t === 'string') types.add(t);
-        } else visit(child);
-      }
-    }
-  };
-  doc.querySelectorAll('script[type="application/ld+json"]').forEach((script) => {
-    try {
-      visit(JSON.parse(script.textContent ?? ''));
-    } catch {
-      // Invalid JSON-LD is ignored.
-    }
-  });
-  return [...types].sort();
 }
 
 /** Analyses fetched HTML. DOMParser builds an inert document: no scripts run and nothing is loaded. */

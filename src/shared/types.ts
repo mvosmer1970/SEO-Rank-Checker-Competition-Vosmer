@@ -16,8 +16,13 @@ export interface Keyword {
   text: string;
   addedAt: string; // ISO timestamp
   tags: string[];
-  /** Ranking URLs of the last 28 days (most impressions first), as of the last sync. */
+  /** Ranking URLs of the day that "Latest" comes from (most impressions first), as of the last sync. */
   pages: KeywordPage[];
+  /** Ranking URLs of the last 7 and 28 days (most impressions first), as of the last sync. */
+  pages7: KeywordPage[];
+  pages28: KeywordPage[];
+  /** The page that should rank for the keyword ('' = none): its own position is shown in the main columns. */
+  targetPage: string;
   /** Google language (hl) of the competition check; '' = the project's language. */
   serpLanguage: string;
 }
@@ -55,6 +60,9 @@ export interface DayMetrics {
 
 /** History of one project: keyword id -> date (YYYY-MM-DD) -> metrics. */
 export type ProjectHistory = Record<string, Record<string, DayMetrics>>;
+
+/** History of the target pages of a project: keyword id -> the target page and its metrics for the keyword per date. */
+export type TargetHistory = Record<string, { page: string; days: Record<string, DayMetrics> }>;
 
 export interface ProjectInput {
   name: string;
@@ -98,6 +106,8 @@ export interface FetchedPage {
   url: string;
   finalUrl: string;
   status: number;
+  /** Content-Type header of the response, '' if none. */
+  contentType: string;
   html: string;
 }
 
@@ -174,6 +184,99 @@ export interface RankingKeyword {
   tracked: boolean;
 }
 
+// ---------------------------------------------------------------- site research
+
+/** Another site that is researched: crawled and analysed, with its rankings estimated through Serper. */
+export interface ResearchSite {
+  id: string;
+  /** Host name without www, e.g. "example.com". */
+  domain: string;
+  /** The URL the crawl starts at (home page). */
+  startUrl: string;
+  /** Maximum number of pages per crawl. */
+  maxPages: number;
+  /** Google country (gl) and language (hl) of the keyword checks. */
+  serpCountry: string;
+  serpLanguage: string;
+  createdAt: string; // ISO timestamp
+  lastCrawlAt: string; // ISO timestamp, '' if never
+  pageCount: number;
+}
+
+export interface ResearchSiteInput {
+  startUrl: string;
+  maxPages: number;
+  serpCountry: string;
+  serpLanguage: string;
+}
+
+export interface ResearchHeading {
+  level: number; // 1..3
+  text: string;
+}
+
+/** The on-page analysis of one crawled page (the HTML itself is not stored). */
+export interface ResearchPage {
+  url: string;
+  /** HTTP status, 0 when the page could not be fetched. */
+  status: number;
+  error: string;
+  title: string;
+  metaDescription: string;
+  canonical: string;
+  noindex: boolean;
+  lang: string;
+  /** The H1-H3 headings in the order of the page. */
+  headings: ResearchHeading[];
+  /** Words of the main content (without navigation, header and footer). */
+  words: number;
+  internalLinks: number;
+  externalLinks: number;
+  /** Domains the page links to (most links first). */
+  externalDomains: string[];
+  /** Internal links to this page from the other crawled pages. */
+  inbound: number;
+  images: number;
+  imagesWithoutAlt: number;
+  schemaTypes: string[];
+  ogType: string;
+  /** Publication and modification date (YYYY-MM-DD) from the meta tags or structured data, '' if unknown. */
+  published: string;
+  modified: string;
+  /** Most frequent words and phrases (2-3 words) of the main content, with their count. */
+  terms: [string, number][];
+  phrases: [string, number][];
+  /** Listed in the sitemap of the site (else found through a link). */
+  inSitemap: boolean;
+}
+
+/** The estimated ranking of a researched site for one keyword (Serper). */
+export interface ResearchKeyword {
+  keyword: string;
+  checkedAt: string; // YYYY-MM-DD
+  /** Best position of the site (1..depth), undefined when it is not in the results that were fetched. */
+  position: number | undefined;
+  /** The ranking URL of the site, '' when it does not rank. */
+  url: string;
+  /** The number of results that were fetched (up to 100). */
+  depth: number;
+  /** The top 10 of Google. */
+  top: SerpEntry[];
+  /** The result of the check before this one, to show the change (undefined before a second check). */
+  previous?: { checkedAt: string; position: number | undefined; depth: number };
+}
+
+export interface ResearchData {
+  pages: ResearchPage[];
+  /** Sitemap URLs that were not crawled because of the page limit. */
+  skippedUrls: number;
+  /** Ranking checks, one per keyword (the last one, with the one before as `previous`). */
+  keywords: ResearchKeyword[];
+  /** The keyword list of the Keywords tab: the suggestions of the pages, plus these, minus the removed ones. */
+  addedKeywords: string[];
+  removedKeywords: string[];
+}
+
 /** The API that the preload script exposes to the renderer as window.rankTracker. */
 export interface RankTrackerApi {
   listProjects(): Promise<Project[]>;
@@ -189,6 +292,9 @@ export interface RankTrackerApi {
   /** '' = the project's language. */
   setKeywordLanguage(projectId: string, keywordId: string, language: string): Promise<Project>;
   getHistory(projectId: string): Promise<ProjectHistory>;
+  getTargetHistory(projectId: string): Promise<TargetHistory>;
+  /** Sets the page that should rank for the keyword ('' = none) and fetches its history (when signed in). */
+  setKeywordTarget(projectId: string, keywordId: string, url: string): Promise<Project>;
   syncProject(projectId: string): Promise<SyncResult>;
   getOpportunities(projectId: string): Promise<Opportunity[]>;
   getRankingKeywords(projectId: string, filter: RankingKeywordsFilter): Promise<RankingKeyword[]>;
@@ -198,7 +304,23 @@ export interface RankTrackerApi {
   getSerperStatus(): Promise<SerperStatus>;
   /** Writes text to the system clipboard (also after a long wait, unlike the browser clipboard). */
   copyToClipboard(text: string): Promise<void>;
+  /** Colors of the window title bar (behind the minimize/maximize/close buttons), to match the theme. */
+  setTitleBarColors(color: string, symbolColor: string): Promise<void>;
+  /** Asks where to save a text file (e.g. a CSV export) and saves it; false when the user cancelled. */
+  saveTextFile(defaultName: string, content: string): Promise<boolean>;
   saveSerperApiKey(key: string): Promise<void>;
+
+  listResearchSites(): Promise<ResearchSite[]>;
+  createResearchSite(input: ResearchSiteInput): Promise<ResearchSite>;
+  updateResearchSite(id: string, input: ResearchSiteInput): Promise<ResearchSite>;
+  deleteResearchSite(id: string): Promise<void>;
+  getResearchData(id: string): Promise<ResearchData>;
+  /** Stores the result of a crawl (replacing the previous pages, keeping the keyword checks). */
+  saveResearchCrawl(id: string, pages: ResearchPage[], skippedUrls: number): Promise<ResearchSite>;
+  /** Looks the keywords up in Google (top 100, one Serper search each) and stores the position of the site for each. */
+  checkResearchKeywords(id: string, keywords: string[]): Promise<ResearchData>;
+  /** Saves the keywords the user added to and removed from the suggestions. */
+  setResearchKeywordList(id: string, added: string[], removed: string[]): Promise<ResearchData>;
 
   getGoogleSettings(): Promise<GoogleSettings>;
   saveGoogleSettings(settings: GoogleSettings): Promise<void>;

@@ -29,6 +29,13 @@ interface RangeSummary {
   impressions: number;
 }
 
+/** A position based on fewer impressions than this is shown as uncertain (grey with "?") and gives no alerts. */
+export const LOW_DATA_IMPRESSIONS = 5;
+
+export function isLowData(impressions: number): boolean {
+  return impressions < LOW_DATA_IMPRESSIONS;
+}
+
 /** Summary of the days from `from` up to and including `to` (YYYY-MM-DD). */
 export function summarize(days: Record<string, DayMetrics>, from: string, to: string): RangeSummary {
   let weighted = 0;
@@ -46,12 +53,19 @@ export function summarize(days: Record<string, DayMetrics>, from: string, to: st
 export interface KeywordSummary {
   latestDate: string | undefined;
   latestPosition: number | undefined;
-  /** Average of the last 7 days and of the 7 days before. */
+  latestImpressions: number;
+  /** Impression-weighted average of the last 7 days and of the 7 days before, with their impressions. */
   week: number | undefined;
+  weekImpressions: number;
   previousWeek: number | undefined;
+  previousWeekImpressions: number;
+  /** Impression-weighted average of the last 28 days. */
+  month: number | undefined;
   clicks28: number;
   impressions28: number;
+  /** Best day, with the impressions of that day. */
   bestPosition: number | undefined;
+  bestImpressions: number;
 }
 
 export function summarizeKeyword(allDays: Record<string, DayMetrics>): KeywordSummary {
@@ -60,18 +74,30 @@ export function summarizeKeyword(allDays: Record<string, DayMetrics>): KeywordSu
   const latestDate = dates[dates.length - 1];
   const today = daysAgo(0);
   const last28 = summarize(days, daysAgo(27), today);
-  let best: number | undefined;
+  const week = summarize(days, daysAgo(6), today);
+  const previousWeek = summarize(days, daysAgo(13), daysAgo(7));
+  // The best day with enough impressions; only without such days the best day of all (shown as uncertain).
+  let best: DayMetrics | undefined;
+  let bestReliable: DayMetrics | undefined;
   for (const metrics of Object.values(days)) {
-    if (best === undefined || metrics.position < best) best = metrics.position;
+    if (!best || metrics.position < best.position) best = metrics;
+    if (!isLowData(metrics.impressions) && (!bestReliable || metrics.position < bestReliable.position)) bestReliable = metrics;
   }
+  best = bestReliable ?? best;
+  const latest = latestDate ? days[latestDate] : undefined;
   return {
     latestDate,
-    latestPosition: latestDate ? days[latestDate]?.position : undefined,
-    week: summarize(days, daysAgo(6), today).position,
-    previousWeek: summarize(days, daysAgo(13), daysAgo(7)).position,
+    latestPosition: latest?.position,
+    latestImpressions: latest?.impressions ?? 0,
+    week: week.position,
+    weekImpressions: week.impressions,
+    previousWeek: previousWeek.position,
+    previousWeekImpressions: previousWeek.impressions,
+    month: last28.position,
     clicks28: last28.clicks,
     impressions28: last28.impressions,
-    bestPosition: best,
+    bestPosition: best?.position,
+    bestImpressions: best?.impressions ?? 0,
   };
 }
 

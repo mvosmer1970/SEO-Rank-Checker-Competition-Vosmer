@@ -6,7 +6,21 @@ import { randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { DEFAULT_IGNORED_DOMAINS, rootDomain } from '../shared/competition';
-import type { AppOptions, GoogleSettings, KeywordPage, Project, ProjectHistory, ProjectInput, SerpData } from '../shared/types';
+import type {
+  AppOptions,
+  GoogleSettings,
+  KeywordPage,
+  Project,
+  ProjectHistory,
+  ProjectInput,
+  ResearchData,
+  ResearchKeyword,
+  ResearchPage,
+  ResearchSite,
+  ResearchSiteInput,
+  SerpData,
+  TargetHistory,
+} from '../shared/types';
 
 interface StoredData {
   projects: Project[];
@@ -18,6 +32,8 @@ interface StoredData {
   serperApiKey: string;
   /** The projects are in the user's order (dragged in the sidebar); before, they were listed by name. */
   projectsOrdered?: boolean;
+  /** Other sites that are researched (their crawl and keyword checks are in research\<id>.json). */
+  researchSites: ResearchSite[];
 }
 
 const DEFAULT_OPTIONS: AppOptions = { autoSync: true, keepInTray: true, startWithWindows: false };
@@ -29,7 +45,14 @@ const EMPTY: StoredData = {
   options: DEFAULT_OPTIONS,
   refreshToken: '',
   serperApiKey: '',
+  researchSites: [],
 };
+
+function researchDir(): string {
+  const dir = join(dataDir(), 'research');
+  mkdirSync(dir, { recursive: true });
+  return dir;
+}
 
 function serpDir(): string {
   const dir = join(dataDir(), 'serp');
@@ -87,6 +110,9 @@ function load(): StoredData {
       for (const keyword of project.keywords) {
         keyword.tags ??= [];
         keyword.pages ??= [];
+        keyword.pages7 ??= [];
+        keyword.pages28 ??= [];
+        keyword.targetPage ??= '';
         keyword.serpLanguage ??= '';
       }
     }
@@ -179,6 +205,7 @@ export function updateProject(id: string, input: ProjectInput): Project {
   if (valid.siteUrl !== project.siteUrl || valid.country !== project.country || valid.device !== project.device) {
     project.lastSyncedDate = '';
     writeHistory(id, {});
+    writeTargetHistory(id, {});
   }
   Object.assign(project, valid);
   save();
@@ -190,6 +217,7 @@ export function deleteProject(id: string): void {
   data.projects = data.projects.filter((p) => p.id !== id);
   save();
   rmSync(join(historyDir(), `${id}.json`), { force: true });
+  rmSync(join(historyDir(), `${id}.target.json`), { force: true });
   rmSync(join(serpDir(), `${id}.json`), { force: true });
 }
 
@@ -204,7 +232,7 @@ export function addKeywords(projectId: string, texts: string[], tags: string[]):
     const text = raw.trim().toLowerCase().replace(/\s+/g, ' ');
     if (!text || existing.has(text)) continue;
     existing.add(text);
-    project.keywords.push({ id: randomUUID(), text, addedAt: now, tags: [...validTags], pages: [], serpLanguage: '' });
+    project.keywords.push({ id: randomUUID(), text, addedAt: now, tags: [...validTags], pages: [], pages7: [], pages28: [], targetPage: '', serpLanguage: '' });
   }
   save();
   return project;
@@ -236,10 +264,16 @@ export function setProjectNotes(projectId: string, notes: string): Project {
 }
 
 /** Stores the ranking URLs per keyword id; keywords deleted in the meantime are skipped. */
-export function setKeywordPages(projectId: string, pages: Map<string, KeywordPage[]>): void {
+export function setKeywordPages(
+  projectId: string,
+  pages: Map<string, { latest: KeywordPage[]; last7: KeywordPage[]; last28: KeywordPage[] }>,
+): void {
   for (const keyword of findProject(projectId).keywords) {
     const keywordPages = pages.get(keyword.id);
-    if (keywordPages) keyword.pages = keywordPages;
+    if (!keywordPages) continue;
+    keyword.pages = keywordPages.latest;
+    keyword.pages7 = keywordPages.last7;
+    keyword.pages28 = keywordPages.last28;
   }
   save();
 }
@@ -254,7 +288,139 @@ export function deleteKeyword(projectId: string, keywordId: string): Project {
   const serp = readSerp(projectId);
   delete serp.results[keywordId];
   writeSerp(projectId, serp);
+  const targets = readTargetHistory(projectId);
+  delete targets[keywordId];
+  writeTargetHistory(projectId, targets);
   return project;
+}
+
+/** Sets the target page of a keyword; the history of another target page is dropped. */
+export function setKeywordTarget(projectId: string, keywordId: string, url: string): Project {
+  const keyword = findProject(projectId).keywords.find((k) => k.id === keywordId);
+  if (!keyword) throw new Error('Keyword not found');
+  const value = url.trim();
+  if (value && !/^https?:\/\//i.test(value)) throw new Error('The target page must be a full URL (https://...)');
+  keyword.targetPage = value;
+  save();
+  const targets = readTargetHistory(projectId);
+  if (targets[keywordId] && targets[keywordId].page !== value) {
+    delete targets[keywordId];
+    writeTargetHistory(projectId, targets);
+  }
+  return findProject(projectId);
+}
+
+export function readTargetHistory(projectId: string): TargetHistory {
+  return readJson<TargetHistory>(join(historyDir(), `${projectId}.target.json`), {});
+}
+
+export function writeTargetHistory(projectId: string, targets: TargetHistory): void {
+  writeJson(join(historyDir(), `${projectId}.target.json`), targets);
+}
+
+// ---------------------------------------------------------------- site research
+
+const MAX_RESEARCH_PAGES = 1000;
+
+function validateResearchInput(input: ResearchSiteInput): ResearchSiteInput & { domain: string } {
+  let raw = input.startUrl.trim();
+  if (!raw) throw new Error('Enter the URL of the site');
+  if (!/^https?:\/\//i.test(raw)) raw = `https://${raw}`;
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    throw new Error(`Not a valid URL: ${input.startUrl}`);
+  }
+  url.hash = '';
+  const maxPages = Math.round(input.maxPages);
+  if (!(maxPages >= 1 && maxPages <= MAX_RESEARCH_PAGES)) throw new Error(`Maximum pages must be 1–${MAX_RESEARCH_PAGES}`);
+  const serpCountry = input.serpCountry.trim().toLowerCase() || 'nl';
+  const serpLanguage = input.serpLanguage.trim().toLowerCase() || 'nl';
+  if (!/^[a-z]{2}$/.test(serpCountry)) throw new Error('Google country must be a 2-letter code, e.g. nl');
+  if (!/^[a-z]{2}(-[a-z]{2})?$/.test(serpLanguage)) throw new Error('Google language must be a code like nl or en');
+  return { startUrl: url.href, maxPages, serpCountry, serpLanguage, domain: url.hostname.toLowerCase().replace(/^www\./, '') };
+}
+
+function findResearchSite(id: string): ResearchSite {
+  const site = load().researchSites.find((s) => s.id === id);
+  if (!site) throw new Error('Research site not found');
+  return site;
+}
+
+function researchPath(id: string): string {
+  return join(researchDir(), `${id}.json`);
+}
+
+export function listResearchSites(): ResearchSite[] {
+  return [...load().researchSites];
+}
+
+export function getResearchSite(id: string): ResearchSite {
+  return findResearchSite(id);
+}
+
+export function createResearchSite(input: ResearchSiteInput): ResearchSite {
+  const site: ResearchSite = { id: randomUUID(), ...validateResearchInput(input), createdAt: new Date().toISOString(), lastCrawlAt: '', pageCount: 0 };
+  load().researchSites.push(site);
+  save();
+  return site;
+}
+
+export function updateResearchSite(id: string, input: ResearchSiteInput): ResearchSite {
+  const site = findResearchSite(id);
+  Object.assign(site, validateResearchInput(input));
+  save();
+  return site;
+}
+
+export function deleteResearchSite(id: string): void {
+  const data = load();
+  data.researchSites = data.researchSites.filter((s) => s.id !== id);
+  save();
+  rmSync(researchPath(id), { force: true });
+}
+
+export function readResearch(id: string): ResearchData {
+  findResearchSite(id);
+  return { pages: [], skippedUrls: 0, keywords: [], addedKeywords: [], removedKeywords: [], ...readJson<Partial<ResearchData>>(researchPath(id), {}) };
+}
+
+export function saveResearchCrawl(id: string, pages: ResearchPage[], skippedUrls: number): ResearchSite {
+  const site = findResearchSite(id);
+  writeJson(researchPath(id), { ...readResearch(id), pages, skippedUrls });
+  site.lastCrawlAt = new Date().toISOString();
+  site.pageCount = pages.length;
+  save();
+  return site;
+}
+
+/** Stores keyword checks; a keyword that was checked before gets the new result, with the old one as `previous`. */
+export function saveResearchKeywords(id: string, checks: ResearchKeyword[]): ResearchData {
+  const data = readResearch(id);
+  const old = new Map(data.keywords.map((k) => [k.keyword, k]));
+  const withPrevious = checks.map((c) => {
+    const before = old.get(c.keyword);
+    // A second check on the same day keeps the comparison with the day before.
+    const previous = before && before.checkedAt === c.checkedAt ? before.previous : before && { checkedAt: before.checkedAt, position: before.position, depth: before.depth };
+    return previous ? { ...c, previous } : c;
+  });
+  const replaced = new Set(checks.map((c) => c.keyword));
+  data.keywords = [...data.keywords.filter((k) => !replaced.has(k.keyword)), ...withPrevious];
+  writeJson(researchPath(id), data);
+  return data;
+}
+
+function normalizeKeywords(keywords: string[]): string[] {
+  return [...new Set(keywords.map((k) => k.trim().toLowerCase().replace(/\s+/g, ' ')).filter(Boolean))];
+}
+
+export function setResearchKeywordList(id: string, added: string[], removed: string[]): ResearchData {
+  const data = readResearch(id);
+  data.addedKeywords = normalizeKeywords(added);
+  data.removedKeywords = normalizeKeywords(removed);
+  writeJson(researchPath(id), data);
+  return data;
 }
 
 export function readSerp(projectId: string): SerpData {

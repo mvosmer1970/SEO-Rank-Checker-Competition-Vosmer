@@ -3,9 +3,10 @@ import { shell } from 'electron';
 import { createHash, randomBytes } from 'node:crypto';
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { daysAgo, summarize, validDays } from '../shared/metrics';
+import { daysAgo, isLowData, summarize, validDays } from '../shared/metrics';
 import type {
   DayMetrics,
+  Keyword,
   KeywordPage,
   Opportunity,
   Project,
@@ -226,12 +227,21 @@ function hasPosition(row: QueryRow): boolean {
   return row.impressions > 0 && row.position > 0;
 }
 
-async function fetchKeywordDays(project: Project, keyword: string, startDate: string, endDate: string): Promise<Record<string, DayMetrics>> {
+/** The daily metrics of a keyword, over all pages or (with `page`) of one page. */
+async function fetchKeywordDays(
+  project: Project,
+  keyword: string,
+  startDate: string,
+  endDate: string,
+  page = '',
+): Promise<Record<string, DayMetrics>> {
+  const filters = [{ dimension: 'query', operator: 'equals', expression: keyword }];
+  if (page) filters.push({ dimension: 'page', operator: 'equals', expression: page });
   const rows = await query(project, {
     startDate,
     endDate,
     dimensions: ['date'],
-    dimensionFilterGroups: filterGroups(project, [{ dimension: 'query', operator: 'equals', expression: keyword }]),
+    dimensionFilterGroups: filterGroups(project, filters),
     rowLimit: 25000,
   });
   const days: Record<string, DayMetrics> = {};
@@ -276,14 +286,60 @@ async function fetchLatestPages(
 /** 7-day average position before and after a sync: a drop of more than this many positions is reported. */
 const ALERT_DROP = 5;
 
+/** No alert when a week has too few impressions to say anything (a jump from 1 to 36 on one impression). */
 function compareWeeks(keyword: string, before: Record<string, DayMetrics>, after: Record<string, DayMetrics>): RankAlert | undefined {
   const today = daysAgo(0);
-  const from = summarize(validDays(before), daysAgo(6), today).position;
-  const to = summarize(validDays(after), daysAgo(6), today).position;
-  if (to === undefined) return undefined;
-  if (from !== undefined && to - from > ALERT_DROP) return { keyword, kind: 'drop', from, to };
-  if (to <= 10 && (from === undefined || from > 10)) return { keyword, kind: 'top10', from, to };
+  const from = summarize(validDays(before), daysAgo(6), today);
+  const to = summarize(validDays(after), daysAgo(6), today);
+  if (to.position === undefined || isLowData(to.impressions)) return undefined;
+  const fromPosition = isLowData(from.impressions) ? undefined : from.position;
+  if (fromPosition !== undefined && to.position - fromPosition > ALERT_DROP) return { keyword, kind: 'drop', from: fromPosition, to: to.position };
+  // A new top 10 only from a known position outside it, or when the keyword had no impressions at all.
+  if (to.position <= 10 && (from.impressions === 0 || (fromPosition !== undefined && fromPosition > 10))) {
+    return { keyword, kind: 'top10', from: fromPosition, to: to.position };
+  }
   return undefined;
+}
+
+/**
+ * Updates the history of the target page of a keyword: from `sinceLastSync` on, or 16 months back when the target
+ * page is new. Returns the days before and after (undefined without target page).
+ */
+async function syncTarget(
+  project: Project,
+  keyword: Keyword,
+  targets: Record<string, { page: string; days: Record<string, DayMetrics> }>,
+  sinceLastSync: string,
+  earliest: string,
+  toDate: string,
+): Promise<{ before: Record<string, DayMetrics> | undefined; after: Record<string, DayMetrics> } | undefined> {
+  if (!keyword.targetPage) {
+    delete targets[keyword.id];
+    return undefined;
+  }
+  const previous = targets[keyword.id]?.page === keyword.targetPage ? targets[keyword.id]?.days : undefined;
+  const fromDate = previous ? sinceLastSync : earliest;
+  const days = await fetchKeywordDays(project, keyword.text, fromDate, toDate, keyword.targetPage);
+  const updated = { ...previous };
+  for (const date of Object.keys(updated)) {
+    if (date >= fromDate || date < earliest) delete updated[date];
+  }
+  Object.assign(updated, days);
+  targets[keyword.id] = { page: keyword.targetPage, days: updated };
+  return { before: previous, after: updated };
+}
+
+/** Fetches the history of the target page of one keyword (after it was set), when signed in. */
+export async function syncKeywordTarget(projectId: string, keywordId: string): Promise<void> {
+  if (!isSignedIn()) return;
+  const project = store.getProject(projectId);
+  const keyword = project.keywords.find((k) => k.id === keywordId);
+  if (!keyword) return;
+  const toDate = daysAgo(0);
+  const earliest = addDays(toDate, -MAX_HISTORY_DAYS);
+  const targets = store.readTargetHistory(projectId);
+  await syncTarget(project, keyword, targets, earliest, earliest, toDate);
+  store.writeTargetHistory(projectId, targets);
 }
 
 const running = new Map<string, Promise<SyncResult>>();
@@ -307,7 +363,8 @@ async function runSync(projectId: string): Promise<SyncResult> {
   const earliest = addDays(toDate, -MAX_HISTORY_DAYS);
   const sinceLastSync = project.lastSyncedDate ? addDays(project.lastSyncedDate, -REFETCH_DAYS) : earliest;
   const history = store.readHistory(projectId);
-  const pages = new Map<string, KeywordPage[]>();
+  const targets = store.readTargetHistory(projectId);
+  const pages = new Map<string, { latest: KeywordPage[]; last7: KeywordPage[]; last28: KeywordPage[] }>();
   const alerts: RankAlert[] = [];
 
   const queue = [...project.keywords];
@@ -323,9 +380,16 @@ async function runSync(projectId: string): Promise<SyncResult> {
       }
       Object.assign(updated, days);
       history[keyword.id] = updated;
-      pages.set(keyword.id, await fetchLatestPages(project, keyword.text, updated, earliest, toDate));
-      // A new keyword has nothing to compare with.
-      const alert = previous ? compareWeeks(keyword.text, previous, updated) : undefined;
+      pages.set(keyword.id, {
+        latest: await fetchLatestPages(project, keyword.text, updated, earliest, toDate),
+        last7: await fetchKeywordPages(project, keyword.text, daysAgo(6), toDate),
+        last28: await fetchKeywordPages(project, keyword.text, daysAgo(27), toDate),
+      });
+      // With a target page the alerts follow its position; a new keyword (or target page) has nothing to compare with.
+      const target = await syncTarget(project, keyword, targets, sinceLastSync, earliest, toDate);
+      const before = target ? target.before : previous;
+      const after = target ? target.after : updated;
+      const alert = before ? compareWeeks(keyword.text, before, after) : undefined;
       if (alert) alerts.push(alert);
     }
   };
@@ -334,7 +398,9 @@ async function runSync(projectId: string): Promise<SyncResult> {
   // Keep only the keywords that still exist (one may have been deleted during the sync).
   const current = new Set(store.getProject(projectId).keywords.map((k) => k.id));
   for (const id of Object.keys(history)) if (!current.has(id)) delete history[id];
+  for (const id of Object.keys(targets)) if (!current.has(id)) delete targets[id];
   store.writeHistory(projectId, history);
+  store.writeTargetHistory(projectId, targets);
   store.setKeywordPages(projectId, pages);
   store.markSynced(projectId, toDate);
   return { projectId, keywordsSynced: project.keywords.length, fromDate: sinceLastSync, toDate, alerts };

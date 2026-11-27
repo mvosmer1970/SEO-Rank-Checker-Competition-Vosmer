@@ -15,7 +15,7 @@ const PERIODS: [number, string][] = [
 
 const TOP: number[] = [10, 20, 50, 100];
 
-type SortKey = 'query' | 'position' | 'clicks' | 'impressions' | 'ctr';
+type SortKey = 'query' | 'page' | 'position' | 'clicks' | 'impressions' | 'ctr';
 
 interface Props {
   project: Project;
@@ -58,7 +58,7 @@ export function RankingKeywords({ project, signedIn, onAdded, onError }: Props) 
     const needle = search.trim().toLowerCase();
     const list = (items ?? []).filter((i) => !needle || i.query.includes(needle) || i.page.toLowerCase().includes(needle));
     return list.sort((a, b) => {
-      const cmp = sort.key === 'query' ? a.query.localeCompare(b.query) : a[sort.key] - b[sort.key];
+      const cmp = sort.key === 'query' || sort.key === 'page' ? a[sort.key].localeCompare(b[sort.key]) : a[sort.key] - b[sort.key];
       return sort.asc ? cmp : -cmp;
     });
   }, [items, search, sort]);
@@ -85,7 +85,7 @@ export function RankingKeywords({ project, signedIn, onAdded, onError }: Props) 
   const header = (key: SortKey, label: string, className = '') => (
     <th
       className={`sortable ${className}`}
-      onClick={() => setSort((s) => ({ key, asc: s.key === key ? !s.asc : key === 'query' || key === 'position' }))}
+      onClick={() => setSort((s) => ({ key, asc: s.key === key ? !s.asc : key === 'query' || key === 'page' || key === 'position' }))}
     >
       {label}
       {sort.key === key ? (sort.asc ? ' ▲' : ' ▼') : ''}
@@ -170,7 +170,7 @@ export function RankingKeywords({ project, signedIn, onAdded, onError }: Props) 
             {header('clicks', 'Clicks', 'num')}
             {header('impressions', 'Impressions', 'num')}
             {header('ctr', 'CTR', 'num')}
-            <th>Page</th>
+            {header('page', 'Page')}
             <th className="num">
               <CopyButton
                 headers={['Keyword', 'Position', 'Clicks', 'Impressions', 'CTR %', 'Page', 'Tracked']}
